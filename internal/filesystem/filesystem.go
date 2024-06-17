@@ -2,7 +2,6 @@ package filesystem
 
 import (
 	"archive/zip"
-	"bufio"
 	"dependency-filter/internal/utils"
 	"encoding/json"
 	"github.com/sirupsen/logrus"
@@ -38,7 +37,7 @@ func NewFileSystem(root string) *FileSystem {
 	return filesystem
 }
 
-// List returns all traversed files and path
+// List returns all traversed files
 func (system *FileSystem) List() ([]File, error) {
 	err := filepath.WalkDir(system.root, func(path string, d fs.DirEntry, err error) error {
 		if path == system.root {
@@ -48,20 +47,25 @@ func (system *FileSystem) List() ([]File, error) {
 			logrus.Warnf("filed to walk folder %q: %v", path, err)
 			return filepath.SkipDir
 		}
-		rel, err := filepath.Rel(system.root, path)
+
+		info, err := d.Info()
+
+		// we only traverse non directory files
+		if info.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(system.root, filepath.Dir(path))
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
 		if err != nil {
 			logrus.Warnf("filed to get info for %q: %v", rel, err)
 			return filepath.SkipDir
 		}
-		if info.IsDir() {
+		// ignore these files, the time of these files will affect subsequent filtering.
+		if info.Name() == ".dependency-filter.json" || info.Name() == ".dependency-filter-tmp.json" || info.Name() == "dependency-filter.zip" || info.Name() == os.Args[0] {
 			return nil
-		}
-		if info.Name() == ".dependency-filter.json" || info.Name() == ".dependency-filter-tmp.json" || info.Name() == "dependency-filter.zip" {
-			return filepath.SkipDir
 		}
 
 		system.newFiles = append(system.newFiles, File{
@@ -79,18 +83,20 @@ func (system *FileSystem) List() ([]File, error) {
 		return nil
 	})
 
+	// save all files information to a temporary file
 	var file *os.File
-	path, _ := utils.Exists(system.root + "/.dependency-filter-tmp.json")
+	path := filepath.Join(system.root, ".dependency-filter-tmp.json")
 	file, _ = os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0644)
+	defer file.Close()
 	bytes, _ := json.Marshal(system.newFiles)
-	writer := bufio.NewWriter(file)
-	_, _ = writer.Write(bytes)
+	_, _ = file.Write(bytes)
 
 	return system.newFiles, err
 }
 
+// load .dependency-filter.json if it exists, the file contains the last dependencies' information
 func (system *FileSystem) load() {
-	file, ok := utils.Exists(system.root + "/.dependency-filter.json")
+	file, ok := utils.Exists(filepath.Join(system.root, ".dependency-filter.json"))
 	if !ok {
 		logrus.Warnf("no .dependency-filter files found in %q", system.root)
 		return
@@ -112,8 +118,7 @@ func (system *FileSystem) Filter(mode string) ([]File, error) {
 	if len(system.oldFiles) == 0 {
 		mode = "latest"
 	}
-	visited := make(map[string]bool)
-	oldFilesMap := make(map[string]File)
+
 	diffFiles := make([]File, 0)
 	newFiles, err := system.List()
 	if err != nil {
@@ -121,25 +126,29 @@ func (system *FileSystem) Filter(mode string) ([]File, error) {
 	}
 
 	if mode == "latest" {
+		// in latest mode, filter the files by their last modified times.
 		for _, file := range newFiles {
-			if system.latestModified.Compare(file.LastModified) == 0 {
+			if duration := system.latestModified.Sub(file.LastModified); duration < time.Hour {
 				diffFiles = append(diffFiles, file)
 			}
 		}
 	} else if mode == "compare" {
+		// in compare mode, only the files that are different from each other are filtered out.
 		var path string
-		for _, file := range system.oldFiles {
-			if file.IsDir {
-				continue
-			}
-			path = filepath.Join(file.RelativePath, file.Name)
-			visited[filepath.Join(file.RelativePath, file.Name)] = false
-			oldFilesMap[path] = file
-		}
-
+		visited := make(map[string]bool)
+		newFilesMap := make(map[string]File)
+		oldFilesMap := make(map[string]File)
 		for _, file := range newFiles {
 			path = filepath.Join(file.RelativePath, file.Name)
-			if ok := visited[path]; ok {
+			visited[filepath.Join(file.RelativePath, file.Name)] = false
+			newFilesMap[path] = file
+		}
+
+		for _, file := range system.oldFiles {
+			path = filepath.Join(file.RelativePath, file.Name)
+			oldFilesMap[path] = file
+			// 如果存在设为true，反之如果不存在则设为false
+			if _, ok := visited[path]; ok {
 				visited[path] = true
 			} else {
 				visited[path] = false
@@ -148,7 +157,11 @@ func (system *FileSystem) Filter(mode string) ([]File, error) {
 
 		for key, value := range visited {
 			if !value {
-				diffFiles = append(diffFiles, oldFilesMap[key])
+				if _, ok := newFilesMap[key]; !ok {
+					diffFiles = append(diffFiles, oldFilesMap[key])
+				} else {
+					diffFiles = append(diffFiles, newFilesMap[key])
+				}
 			}
 		}
 	}
@@ -157,19 +170,21 @@ func (system *FileSystem) Filter(mode string) ([]File, error) {
 }
 func (system *FileSystem) Compress(files []File, writer io.Writer) {
 	if len(files) == 0 {
+		logrus.Info("no files to compress")
 		return
 	}
+	logrus.Infof("finding %d different/latest files", len(files))
 	zipWriter := zip.NewWriter(writer)
 	defer zipWriter.Close()
 	for _, file := range files {
-		path := filepath.Join(file.RelativePath, file.Name)
+		path := filepath.Join(system.root, file.RelativePath, file.Name)
 		info, err := os.Open(path)
 		if err != nil {
 			logrus.Warn("Error opening file: " + path)
 			return
 		}
 		header := &zip.FileHeader{
-			Name:               filepath.FromSlash(path),
+			Name:               filepath.FromSlash(filepath.Join(file.RelativePath, file.Name)),
 			Modified:           file.LastModified,
 			UncompressedSize64: file.Size,
 			Method:             zip.Deflate,
