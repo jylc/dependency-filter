@@ -21,16 +21,18 @@ type File struct {
 	LastModified time.Time `json:"last_modified"`
 }
 type FileSystem struct {
-	root     string
-	newFiles []File
-	oldFiles []File
+	root           string
+	newFiles       []File
+	oldFiles       []File
+	latestModified time.Time
 }
 
 func NewFileSystem(root string) *FileSystem {
 	filesystem := &FileSystem{
-		root:     root,
-		newFiles: make([]File, 0),
-		oldFiles: make([]File, 0),
+		root:           root,
+		newFiles:       make([]File, 0),
+		oldFiles:       make([]File, 0),
+		latestModified: time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 	filesystem.load()
 	return filesystem
@@ -55,6 +57,13 @@ func (system *FileSystem) List() ([]File, error) {
 			logrus.Warnf("filed to get info for %q: %v", rel, err)
 			return filepath.SkipDir
 		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Name() == ".dependency-filter.json" || info.Name() == ".dependency-filter-tmp.json" || info.Name() == "dependency-filter.zip" {
+			return filepath.SkipDir
+		}
+
 		system.newFiles = append(system.newFiles, File{
 			Name:         info.Name(),
 			RelativePath: filepath.ToSlash(rel),
@@ -62,33 +71,46 @@ func (system *FileSystem) List() ([]File, error) {
 			IsDir:        info.IsDir(),
 			LastModified: info.ModTime(),
 		})
+
+		lastModified := info.ModTime()
+		if system.latestModified.Before(lastModified) {
+			system.latestModified = lastModified
+		}
 		return nil
 	})
+
+	var file *os.File
+	path, _ := utils.Exists(system.root + "/.dependency-filter-tmp.json")
+	file, _ = os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0644)
+	bytes, _ := json.Marshal(system.newFiles)
+	writer := bufio.NewWriter(file)
+	_, _ = writer.Write(bytes)
+
 	return system.newFiles, err
 }
 
 func (system *FileSystem) load() {
-	file, ok := utils.Exists(system.root + "/.dependency-filter")
+	file, ok := utils.Exists(system.root + "/.dependency-filter.json")
 	if !ok {
 		logrus.Warnf("no .dependency-filter files found in %q", system.root)
 		return
 	}
 	infos, err := os.ReadFile(file)
 	if err != nil {
-		logrus.Warnf("failed to read .dependency-filter file %q: %v", file, err)
+		logrus.Warnf("failed to read .dependency-filter.json file %q: %v", file, err)
 		return
 	}
 	err = json.Unmarshal(infos, &system.oldFiles)
 	if err != nil {
-		logrus.Warnf("failed to unmarshal .dependency-filter file %q: %v", file, err)
+		logrus.Warnf("failed to unmarshal .dependency-filter.json file %q: %v", file, err)
 		return
 	}
 }
 
 // Filter returns the files with differences, which are the latest dependencies
-func (system *FileSystem) Filter() ([]File, error) {
-	if len(system.newFiles) == 0 {
-		return nil, nil
+func (system *FileSystem) Filter(mode string) ([]File, error) {
+	if len(system.oldFiles) == 0 {
+		mode = "latest"
 	}
 	visited := make(map[string]bool)
 	oldFilesMap := make(map[string]File)
@@ -97,42 +119,42 @@ func (system *FileSystem) Filter() ([]File, error) {
 	if err != nil {
 		return nil, err
 	}
-	var path string
-	for _, file := range system.oldFiles {
-		if file.IsDir {
-			continue
+
+	if mode == "latest" {
+		for _, file := range newFiles {
+			if system.latestModified.Compare(file.LastModified) == 0 {
+				diffFiles = append(diffFiles, file)
+			}
 		}
-		path = filepath.Join(file.RelativePath, file.Name)
-		visited[filepath.Join(file.RelativePath, file.Name)] = false
-		oldFilesMap[path] = file
+	} else if mode == "compare" {
+		var path string
+		for _, file := range system.oldFiles {
+			if file.IsDir {
+				continue
+			}
+			path = filepath.Join(file.RelativePath, file.Name)
+			visited[filepath.Join(file.RelativePath, file.Name)] = false
+			oldFilesMap[path] = file
+		}
+
+		for _, file := range newFiles {
+			path = filepath.Join(file.RelativePath, file.Name)
+			if ok := visited[path]; ok {
+				visited[path] = true
+			} else {
+				visited[path] = false
+			}
+		}
+
+		for key, value := range visited {
+			if !value {
+				diffFiles = append(diffFiles, oldFilesMap[key])
+			}
+		}
 	}
 
-	for _, file := range newFiles {
-		path = filepath.Join(file.RelativePath, file.Name)
-		if ok := visited[path]; ok {
-			visited[path] = true
-		} else {
-			visited[path] = false
-		}
-	}
-
-	for key, value := range visited {
-		if !value {
-			diffFiles = append(diffFiles, oldFilesMap[key])
-		}
-	}
 	return diffFiles, nil
 }
-
-func (system *FileSystem) Save() {
-	var file *os.File
-	path, _ := utils.Exists(system.root + "/.dependency-filter")
-	file, _ = os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0644)
-	bytes, _ := json.Marshal(system.newFiles)
-	writer := bufio.NewWriter(file)
-	_, _ = writer.Write(bytes)
-}
-
 func (system *FileSystem) Compress(files []File, writer io.Writer) {
 	if len(files) == 0 {
 		return
@@ -162,4 +184,10 @@ func (system *FileSystem) Compress(files []File, writer io.Writer) {
 		}
 		_ = info.Close()
 	}
+}
+
+func (system *FileSystem) Flush() {
+	oldpath := filepath.Join(system.root, ".dependency-filter-tmp.json")
+	newpath := filepath.Join(system.root, ".dependency-filter.json")
+	_ = os.Rename(oldpath, newpath)
 }

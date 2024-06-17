@@ -29,3 +29,4 @@ conf/conf.ini
 
 dist/
 /.idea/
+./test
