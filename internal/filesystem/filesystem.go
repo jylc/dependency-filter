@@ -114,7 +114,7 @@ func (system *FileSystem) load() {
 }
 
 // Filter returns the files with differences, which are the latest dependencies
-func (system *FileSystem) Filter(mode string) ([]File, error) {
+func (system *FileSystem) Filter(mode string, interval int) ([]File, error) {
 	if len(system.oldFiles) == 0 {
 		mode = "latest"
 	}
@@ -128,7 +128,7 @@ func (system *FileSystem) Filter(mode string) ([]File, error) {
 	if mode == "latest" {
 		// in latest mode, filter the files by their last modified times.
 		for _, file := range newFiles {
-			if duration := system.latestModified.Sub(file.LastModified); duration < time.Hour {
+			if duration := system.latestModified.Sub(file.LastModified); duration < time.Duration(interval)*time.Minute {
 				diffFiles = append(diffFiles, file)
 			}
 		}
