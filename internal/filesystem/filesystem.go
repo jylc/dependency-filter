@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"dependency-filter/internal/utils"
 	"encoding/json"
+	"fmt"
+	"github.com/schollz/progressbar/v3"
 	"github.com/sirupsen/logrus"
 	"io"
 	"io/fs"
@@ -176,6 +178,23 @@ func (system *FileSystem) Compress(files []File, writer io.Writer) {
 	logrus.Infof("finding %d different/latest files", len(files))
 	zipWriter := zip.NewWriter(writer)
 	defer zipWriter.Close()
+
+	bar := progressbar.NewOptions(len(files),
+		progressbar.OptionShowCount(),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetDescription("Compress files..."),
+		progressbar.OptionOnCompletion(func() {
+			fmt.Println("\nCompress finished")
+		}),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "[green]=[reset]",
+			SaucerHead:    "[green]>[reset]",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}))
+
 	for _, file := range files {
 		path := filepath.Join(system.root, file.RelativePath, file.Name)
 		info, err := os.Open(path)
@@ -198,7 +217,9 @@ func (system *FileSystem) Compress(files []File, writer io.Writer) {
 			return
 		}
 		_ = info.Close()
+		bar.Add(1)
 	}
+	fmt.Println()
 }
 
 func (system *FileSystem) Flush() {

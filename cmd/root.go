@@ -36,7 +36,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.Flags().StringVarP(&dependency, "dependency", "d", "", "maven dependency path need to be scanned")
+	rootCmd.Flags().StringVarP(&dependency, "dependency", "d", "", "maven dependency path which need to be scanned")
 	rootCmd.Flags().StringVarP(&mode, "mode", "", "compare", "1)compare mode: compare old dependency list with the newly;2)latest mode: filter the latest modified time dependency")
 	rootCmd.Flags().IntVarP(&interval, "interval", "i", 1, "filter time range(minutes)")
 }
